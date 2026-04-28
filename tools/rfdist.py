@@ -1,161 +1,97 @@
+# rfdist.py <tree1> <tree2>
+#
+# Implementation of Day's algorihtm for computing the rf-distance between
+# tree1 to tree2 over the same set of leaves, i.e. the number of splits not
+# found in both trees.The two trees are read from the commandline and are
+# assume to be in Newick-format. The Newick-parser from Biopyton
+# (see https://biopython.org/wiki/Phylo) is used.
+#
+# Christian Storm Pedersen <cstorm@birc.au.dk>
+
 import sys
-from pathlib import Path
+from Bio import Phylo
 
 
-def parse_newick(text):
-    text = text.strip().rstrip(";")
-    i = 0
-    graph = {}
-    leaves = set()
-    node_id = 0
-
-    def new_internal():
-        nonlocal node_id
-        name = f"__internal_{node_id}"
-        node_id += 1
-        graph.setdefault(name, [])
-        return name
-
-    def add_edge(a, b):
-        graph.setdefault(a, []).append(b)
-        graph.setdefault(b, []).append(a)
-
-    def skip_spaces():
-        nonlocal i
-        while i < len(text) and text[i].isspace():
-            i += 1
-
-    def skip_branch_length():
-        nonlocal i
-        skip_spaces()
-        if i < len(text) and text[i] == ":":
-            i += 1
-            while i < len(text) and text[i] not in ",();":
-                i += 1
-
-    def parse_label():
-        nonlocal i
-        skip_spaces()
-
-        if text[i] in "'\"":
-            quote = text[i]
-            i += 1
-            start = i
-            while i < len(text) and text[i] != quote:
-                i += 1
-            label = text[start:i]
-            i += 1
-        else:
-            start = i
-            while i < len(text) and text[i] not in ":,();":
-                i += 1
-            label = text[start:i].strip()
-
-        label = label.strip().strip("'\"")
-        skip_branch_length()
-
-        graph.setdefault(label, [])
-        leaves.add(label)
-        return label
-
-    def parse_subtree():
-        nonlocal i
-        skip_spaces()
-
-        if text[i] == "(":
-            node = new_internal()
-            i += 1
-
-            while True:
-                child = parse_subtree()
-                add_edge(node, child)
-
-                skip_spaces()
-
-                if i < len(text) and text[i] == ",":
-                    i += 1
-                    continue
-
-                if i < len(text) and text[i] == ")":
-                    i += 1
-                    break
-
-            skip_spaces()
-
-            # ignore possible internal node label
-            while i < len(text) and text[i] not in ":,();":
-                i += 1
-
-            skip_branch_length()
-            return node
-
-        return parse_label()
-
-    parse_subtree()
-    return graph, leaves
+def count_dublets(l):
+    """
+    returns the number of dublets in a list
+    """
+    return len(l) - len(list(set(l)))
 
 
-def leaves_on_side(graph, leaves, start, blocked):
-    stack = [start]
-    seen = set()
-    found = set()
-
-    while stack:
-        node = stack.pop()
-        if node in seen:
-            continue
-        seen.add(node)
-
-        if node in leaves:
-            found.add(node)
-
-        for nxt in graph[node]:
-            if (node, nxt) == blocked or (nxt, node) == blocked:
-                continue
-            stack.append(nxt)
-
-    return found
-
-
-def splits_from_tree(path):
-    graph, leaves = parse_newick(Path(path).read_text())
-    all_leaves = set(leaves)
-    n = len(all_leaves)
-    splits = set()
-
-    for u in graph:
-        for v in graph[u]:
-            if str(u) > str(v):
-                continue
-
-            side = leaves_on_side(graph, all_leaves, u, (u, v))
-
-            if 1 < len(side) < n - 1:
-                other = all_leaves - side
-
-                if len(other) < len(side):
-                    side = other
-                elif len(other) == len(side) and sorted(other) < sorted(side):
-                    side = other
-
-                splits.add(frozenset(side))
-
-    return splits, all_leaves
+def dfs(node, splits):
+    """
+    performs a dfs traversal of a Phylo tree from 'node' and adds splits to the
+    list 'splits' that form a consecutive interval cf. the naming of the leaves
+    specified in the dictionary 'dfs_num' that maps leaf names to numbers
+    """
+    if node.is_terminal():
+        minval = maxval = dfs_num[node.name]
+        size = 1
+    else:
+        minval = sys.maxsize
+        maxval = -sys.maxsize
+        size = 0
+        for child in node.clades:
+            child_min, child_max, child_size = dfs(child, splits)
+            if child_min < minval:
+                minval = child_min
+            if child_max > maxval:
+                maxval = child_max
+            size = size + child_size
+        if size == maxval - minval + 1:
+            splits.append((minval, maxval))
+    return minval, maxval, size
 
 
-def rf_distance(file1, file2):
-    splits1, leaves1 = splits_from_tree(file1)
-    splits2, leaves2 = splits_from_tree(file2)
+# Read the two trees from the commandline
+tree1 = Phylo.read(sys.argv[1], "newick")
+tree2 = Phylo.read(sys.argv[2], "newick")
 
-    if leaves1 != leaves2:
-        raise ValueError("The two trees do not contain the same leaves")
+# Reroot the two trees by 'outgrouping' the same leaf.
+root_leaf = tree1.get_terminals()[0].name
+tree1.root_with_outgroup(root_leaf)
+tree2.root_with_outgroup(root_leaf)
 
-    return len(splits1.symmetric_difference(splits2))
+# After rerooting the two trees with 'root_leaf' as outgroup, they look as:
+#
+#          tree.root
+#      ________|_______
+#     |               v
+# root_leaf       ____|____
+#                 |        |
+#
+# The number of 'non-trivial' splits is equal to the number of internal nodes
+# in the subtree rooted at v, i.e. the number of internal nodes in the entire
+# tree minus 2, since tree.root and v correspond to trivial splits in the
+# original input tree.
 
+# Make mapping from leaf names to dfs-numbers
+dfs_num = {}
+num = 1
+for leaf in tree1.find_clades("", True, "postorder"):
+    dfs_num[leaf.name] = num
+    num = num + 1
 
-if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python3 rfdist.py tree1.newick tree2.newick")
-        sys.exit(1)
+# Collect all splits in tree1
+splits = []
+dfs(tree1.root, splits)
 
-    print(rf_distance(sys.argv[1], sys.argv[2]))
+# Remove the two trivial splits that occur due to the rooting of tree1
+splits = splits[:-2]
+
+# Add potential shared splits form tree2
+dfs(tree2.root, splits)
+
+# Remove the two trivial splits that occur due to the rooting of tree2
+splits = splits[:-2]
+
+# The RF-distance is the number of unique splits in tree1 and tree2
+num_of_nontrivial_splits = len(
+    tree1.get_nonterminals()) - 2 + len(tree2.get_nonterminals()) - 2
+num_of_shared_nontrivial_splits = count_dublets(splits)
+rfdist = num_of_nontrivial_splits - 2 * num_of_shared_nontrivial_splits
+
+print("RF Distance (number of unique splits):", rfdist)
+print("Fraction of non-trivial splits:       ",
+      rfdist / num_of_nontrivial_splits)
