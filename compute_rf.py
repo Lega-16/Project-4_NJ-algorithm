@@ -18,10 +18,17 @@ for qt_file in files:
 
     def rf(a, b):
         print(f" Comparing {a.name} vs {b.name}")
+
         result = subprocess.check_output(
-            ["python3", "tools/rfdist.py", str(a), str(b)]
+            ["python3", "tools/rfdist.py", str(a), str(b)],
+            text=True
         )
-        return int(result.strip())
+
+        for line in result.splitlines():
+            if line.startswith("RF Distance"):
+                return int(line.split(":")[1].strip())
+
+        raise ValueError(f"Could not parse RF distance from output:\n{result}")
 
     rows.append({
         "matrix": base,
